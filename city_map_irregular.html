@@ -1,0 +1,1376 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>星樱坂城市地图 - 不规则路网版</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #1a1a2e; color: white; font-family: 'Microsoft YaHei', Arial, sans-serif; overflow: hidden; }
+        #game-container { width: 100vw; height: 100vh; display: flex; flex-direction: column; }
+        #header { height: 50px; background: linear-gradient(135deg, #667eea, #764ba2); display: flex; align-items: center; justify-content: space-between; padding: 0 20px; }
+        #game-title { font-size: 20px; font-weight: bold; }
+        #stats-panel { display: flex; gap: 15px; font-size: 12px; }
+        .stat-item { display: flex; align-items: center; gap: 5px; background: rgba(255,255,255,0.1); padding: 3px 8px; border-radius: 5px; }
+        #map-container { flex: 1; position: relative; overflow: hidden; background: #0f0f23; }
+        #game-canvas { position: absolute; top: 0; left: 0; image-rendering: pixelated; }
+        #ui-overlay { position: absolute; bottom: 15px; left: 50%; transform: translateX(-50%); display: flex; gap: 8px; z-index: 50; }
+        .ui-button { padding: 8px 16px; background: linear-gradient(135deg, #3498db, #2980b9); border: none; border-radius: 5px; color: white; cursor: pointer; font-size: 12px; }
+        .ui-button:hover { transform: translateY(-2px); }
+        #location-info { position: absolute; top: 10px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,0.8); padding: 6px 12px; border-radius: 15px; font-size: 12px; z-index: 50; }
+        #controls-help { position: absolute; top: 10px; left: 10px; background: rgba(0,0,0,0.7); padding: 8px; border-radius: 5px; font-size: 11px; z-index: 50; }
+        .key-hint { display: flex; align-items: center; gap: 6px; margin: 2px 0; }
+        .key { display: inline-block; padding: 1px 4px; background: #333; border: 1px solid #555; border-radius: 3px; font-family: monospace; min-width: 18px; text-align: center; }
+        #interaction-menu { position: absolute; background: rgba(0,0,0,0.95); border: 2px solid #3498db; border-radius: 8px; padding: 10px; display: none; z-index: 100; min-width: 140px; }
+        #interaction-menu.visible { display: block; }
+        .menu-item { padding: 6px 10px; cursor: pointer; border-radius: 4px; margin: 3px 0; transition: background 0.2s; }
+        .menu-item:hover { background: rgba(52,152,219,0.3); }
+        .menu-item.danger:hover { background: rgba(231,76,60,0.3); }
+    </style>
+</head>
+<body>
+    <div id="game-container">
+        <div id="header">
+            <div id="game-title">🌸 星樱坂城市地图</div>
+            <div id="stats-panel">
+                <div class="stat-item">❤️ <span id="stat-hp">100</span>/100</div>
+                <div class="stat-item">💰 <span id="stat-coin">500</span></div>
+                <div class="stat-item">⚖️ <span id="stat-sin">0</span></div>
+                <div class="stat-item">📅 <span id="stat-day">第1天</span></div>
+            </div>
+        </div>
+        
+        <div id="map-container">
+            <canvas id="game-canvas"></canvas>
+            <div id="location-info">📍 <span id="location-name">星樱坂</span></div>
+            <div id="controls-help">
+                <div class="key-hint"><span class="key">W</span><span class="key">A</span><span class="key">S</span><span class="key">D</span> 移动</div>
+                <div class="key-hint"><span class="key">Shift</span> 潜行</div>
+                <div class="key-hint"><span class="key">F</span> 交互</div>
+            </div>
+            <div id="ui-overlay">
+                <button class="ui-button" onclick="showQuestLog()">📋 任务</button>
+                <button class="ui-button" onclick="openStatus()">👤 状态</button>
+                <button class="ui-button" onclick="goHome()">🏠 回家</button>
+                <button class="ui-button" onclick="continueToEvent()">▶️ 继续事件</button>
+            </div>
+            <div id="interaction-menu">
+                <div class="menu-item" onclick="interactWithNPC('talk')">💬 交谈</div>
+                <div class="menu-item" onclick="interactWithNPC('rob')">💰 抢劫</div>
+                <div class="menu-item danger" onclick="interactWithNPC('attack')">⚔️ 攻击</div>
+            </div>
+        </div>
+    </div>
+
+<script>
+(function() {
+    'use strict';
+
+    const CONFIG = {
+        WORLD_WIDTH: 2500,
+        WORLD_HEIGHT: 2500,
+        CANVAS_WIDTH: 1200,
+        CANVAS_HEIGHT: 800,
+        PLAYER_SIZE: 24,
+        NPC_SIZE: 24,
+        PLAYER_SPEED: 3,
+        PLAYER_SNEAK_SPEED: 1.5,
+        VEHICLE_MAX: 8,
+        VEHICLE_SPEED: 0.8,
+        PEDESTRIAN_MAX: 15,
+        TRAFFIC_LIGHT_FRAMES: { red: 150, yellow: 15, green: 100 },
+        GRID_SIZE: 64
+    };
+
+    window.game = {
+        hp: 100, maxHp: 100, coin: 500, sin: 0, day: 1, slot: 1,
+        favor: [0,0,0,0,0], girlView: [0,0,0,0,0],
+        weather: { name: '晴天', visibility: 1 },
+        isInPrison: false, isWanted: false, wantedLevel: 0
+    };
+
+    // 不规则道路网络数据定义
+    const ROADS_DATA = [
+        // 主干道：弯曲主干道（C形）- 连接住宅区和商业区
+        {
+            id: 'main_curve', type: 'main', width: 120, lanes: 4,
+            path: [
+                { x: 200, y: 500 },
+                { x: 400, y: 450, cp: { x: 300, y: 400 } },
+                { x: 600, y: 550, cp: { x: 500, y: 520 } },
+                { x: 800, y: 700 },
+                { x: 900, y: 900, cp: { x: 850, y: 820 } },
+                { x: 850, y: 1100 }
+            ]
+        },
+        // 主干道：南北主干道
+        { id: 'main_ns', type: 'main', width: 120, lanes: 4, path: [{ x: 1200, y: 100 }, { x: 1200, y: 1200 }] },
+        // 主干道：东西主干道（略带弯曲）
+        {
+            id: 'main_ew', type: 'main', width: 120, lanes: 4,
+            path: [
+                { x: 500, y: 1500 },
+                { x: 1000, y: 1480, cp: { x: 750, y: 1490 } },
+                { x: 1500, y: 1520 },
+                { x: 2000, y: 1480 }
+            ]
+        },
+        // 次干道：住宅区弯曲道路
+        {
+            id: 'residential_road1', type: 'secondary', width: 80, lanes: 2,
+            path: [
+                { x: 100, y: 300 },
+                { x: 250, y: 280, cp: { x: 180, y: 260 } },
+                { x: 400, y: 350 }
+            ]
+        },
+        // 次干道：学校区较规整道路
+        { id: 'school_road', type: 'secondary', width: 80, lanes: 2, path: [{ x: 1000, y: 200 }, { x: 1000, y: 600 }] },
+        // 次干道：商业区斜向道路（东北-西南）
+        { id: 'commercial_diag1', type: 'secondary', width: 80, lanes: 2, path: [{ x: 1600, y: 800 }, { x: 1200, y: 1200 }] },
+        // 次干道：斜向道路（西北-东南）
+        { id: 'commercial_diag2', type: 'secondary', width: 80, lanes: 2, path: [{ x: 1100, y: 1400 }, { x: 1500, y: 1800 }] },
+        // 支路：住宅区弯曲支路1
+        {
+            id: 'residential_lane1', type: 'minor', width: 60, lanes: 1,
+            path: [
+                { x: 200, y: 500 },
+                { x: 150, y: 650, cp: { x: 180, y: 580 } },
+                { x: 200, y: 800 }
+            ]
+        },
+        // 支路：住宅区弯曲支路2（死胡同）
+        {
+            id: 'residential_lane2', type: 'minor', width: 60, lanes: 1,
+            path: [
+                { x: 300, y: 700 },
+                { x: 250, y: 850, cp: { x: 280, y: 780 } },
+                { x: 300, y: 1000 }
+            ],
+            isDeadEnd: true
+        },
+        // 支路：神社区弧形参道
+        {
+            id: 'shrine_path', type: 'minor', width: 60, lanes: 1,
+            path: [
+                { x: 2000, y: 2000 },
+                { x: 1900, y: 1800, cp: { x: 2000, y: 1850 } },
+                { x: 1800, y: 1700 }
+            ]
+        },
+        // 丁字路口1连接路
+        { id: 't_junction1', type: 'minor', width: 60, lanes: 1, path: [{ x: 600, y: 550 }, { x: 600, y: 400 }] },
+        // 丁字路口2连接路
+        { id: 't_junction2', type: 'minor', width: 60, lanes: 1, path: [{ x: 1200, y: 800 }, { x: 1000, y: 800 }] },
+        // 丁字路口3连接路
+        { id: 't_junction3', type: 'minor', width: 60, lanes: 1, path: [{ x: 1500, y: 1520 }, { x: 1500, y: 1300 }] },
+        // 十字路口连接
+        { id: 'cross_connect1', type: 'secondary', width: 80, lanes: 2, path: [{ x: 1200, y: 1500 }, { x: 1200, y: 1800 }] },
+        // 死胡同小广场入口
+        { id: 'plaza_road', type: 'minor', width: 60, lanes: 1, path: [{ x: 300, y: 1000 }, { x: 300, y: 1050 }] }
+    ];
+
+    const CROSSWALKS = [
+        // 弯曲主干道斑马线（C形道路沿线）
+        { id: 'cw_main1', x: 200, y: 480, width: 70, height: 50, rotation: 0 },
+        { id: 'cw_main2', x: 300, y: 460, width: 70, height: 50, rotation: 0 },
+        { id: 'cw_main3', x: 400, y: 480, width: 70, height: 50, rotation: 0 },
+        { id: 'cw_main4', x: 500, y: 520, width: 70, height: 50, rotation: 0 },
+        { id: 'cw_main5', x: 600, y: 580, width: 70, height: 50, rotation: 0 },
+        { id: 'cw_main6', x: 700, y: 640, width: 70, height: 50, rotation: 0 },
+        { id: 'cw_main7', x: 800, y: 700, width: 70, height: 50, rotation: 0 },
+        { id: 'cw_main8', x: 850, y: 800, width: 70, height: 50, rotation: 0 },
+        { id: 'cw_main9', x: 850, y: 900, width: 70, height: 50, rotation: 0 },
+        { id: 'cw_main10', x: 850, y: 1000, width: 70, height: 50, rotation: 0 },
+        
+        // 南北主干道斑马线
+        { id: 'cw_ns1', x: 1180, y: 200, width: 50, height: 70, rotation: 0 },
+        { id: 'cw_ns2', x: 1220, y: 350, width: 50, height: 70, rotation: 0 },
+        { id: 'cw_ns3', x: 1180, y: 500, width: 50, height: 70, rotation: 0 },
+        { id: 'cw_ns4', x: 1220, y: 650, width: 50, height: 70, rotation: 0 },
+        { id: 'cw_ns5', x: 1180, y: 800, width: 50, height: 70, rotation: 0 },
+        { id: 'cw_ns6', x: 1220, y: 950, width: 50, height: 70, rotation: 0 },
+        { id: 'cw_ns7', x: 1180, y: 1100, width: 50, height: 70, rotation: 0 },
+        
+        // 东西主干道斑马线
+        { id: 'cw_ew1', x: 550, y: 1480, width: 70, height: 50, rotation: 0 },
+        { id: 'cw_ew2', x: 750, y: 1490, width: 70, height: 50, rotation: 0 },
+        { id: 'cw_ew3', x: 1000, y: 1490, width: 70, height: 50, rotation: 0 },
+        { id: 'cw_ew4', x: 1250, y: 1510, width: 70, height: 50, rotation: 0 },
+        { id: 'cw_ew5', x: 1500, y: 1520, width: 70, height: 50, rotation: 0 },
+        { id: 'cw_ew6', x: 1750, y: 1500, width: 70, height: 50, rotation: 0 },
+        { id: 'cw_ew7', x: 2000, y: 1490, width: 70, height: 50, rotation: 0 },
+        
+        // 住宅区道路斑马线
+        { id: 'cw_res1', x: 150, y: 290, width: 60, height: 50, rotation: 0 },
+        { id: 'cw_res2', x: 300, y: 300, width: 60, height: 50, rotation: 0 },
+        { id: 'cw_res3', x: 400, y: 340, width: 60, height: 50, rotation: 0 },
+        
+        // 住宅区支路斑马线
+        { id: 'cw_lane1', x: 160, y: 580, width: 60, height: 50, rotation: 0 },
+        { id: 'cw_lane2', x: 270, y: 750, width: 60, height: 50, rotation: 0 },
+        
+        // 学校区道路斑马线
+        { id: 'cw_school1', x: 980, y: 300, width: 50, height: 70, rotation: 0 },
+        { id: 'cw_school2', x: 1020, y: 450, width: 50, height: 70, rotation: 0 },
+        
+        // 斜向道路1斑马线（东北-西南）
+        { id: 'cw_diag1_a', x: 1550, y: 850, width: 60, height: 60, rotation: 45 },
+        { id: 'cw_diag1_b', x: 1400, y: 1000, width: 60, height: 60, rotation: 45 },
+        { id: 'cw_diag1_c', x: 1300, y: 1100, width: 60, height: 60, rotation: 45 },
+        
+        // 斜向道路2斑马线（西北-东南）
+        { id: 'cw_diag2_a', x: 1150, y: 1450, width: 60, height: 60, rotation: 45 },
+        { id: 'cw_diag2_b', x: 1300, y: 1600, width: 60, height: 60, rotation: 45 },
+        { id: 'cw_diag2_c', x: 1450, y: 1750, width: 60, height: 60, rotation: 45 },
+        
+        // 神社区参道斑马线
+        { id: 'cw_shrine1', x: 1950, y: 1950, width: 60, height: 50, rotation: 0 },
+        { id: 'cw_shrine2', x: 1850, y: 1800, width: 60, height: 50, rotation: 0 },
+        
+        // 十字路口 - 主干道交汇
+        { id: 'cw_cross1', x: 1140, y: 1460, width: 70, height: 50, rotation: 0 },
+        { id: 'cw_cross2', x: 1260, y: 1560, width: 70, height: 50, rotation: 0 },
+        { id: 'cw_cross3', x: 1180, y: 1500, width: 50, height: 70, rotation: 0 },
+        { id: 'cw_cross4', x: 1220, y: 1520, width: 50, height: 70, rotation: 0 }
+    ];
+
+    const TRAFFIC_LIGHTS = [
+        { id: 'light1', x: 1180, y: 1480, state: 'green', frame: 0 },
+        { id: 'light2', x: 1220, y: 1520, state: 'red', frame: 0 },
+        { id: 'light3', x: 580, y: 530, state: 'green', frame: 0 },
+        { id: 'light4', x: 620, y: 570, state: 'red', frame: 0 },
+        { id: 'light5', x: 1180, y: 780, state: 'green', frame: 0 },
+        { id: 'light6', x: 1220, y: 820, state: 'red', frame: 0 }
+    ];
+
+    const BUILDINGS = [
+        // 住宅区 - 远离道路
+        { id: 'home', name: '玩家住宅', x: 20, y: 20, width: 80, height: 60, color: '#8e44ad', enterable: true },
+        { id: 'convenience', name: '便利店', x: 20, y: 600, width: 60, height: 40, color: '#27ae60', enterable: true },
+        { id: 'apartment1', name: '樱花公寓', x: 480, y: 150, width: 80, height: 90, color: '#95a5a6', enterable: false },
+        { id: 'small_park', name: '小公园', x: 20, y: 950, width: 90, height: 60, color: '#2ecc71', enterable: false },
+        // 学校区 - 远离道路
+        { id: 'school_main', name: '星樱坂高校', x: 1320, y: 150, width: 180, height: 130, color: '#3498db', enterable: true },
+        { id: 'student_council', name: '学生会馆', x: 1520, y: 350, width: 60, height: 40, color: '#f1c40f', enterable: true },
+        // 商业区 - 远离道路
+        { id: 'mall', name: '星樱百货', x: 1750, y: 1100, width: 160, height: 110, color: '#e91e63', enterable: true },
+        { id: 'game_center', name: '电玩城', x: 1750, y: 1400, width: 80, height: 60, color: '#9b59b6', enterable: true },
+        { id: 'cafe', name: '星樱咖啡厅', x: 1950, y: 1300, width: 60, height: 40, color: '#795548', enterable: true },
+        // 神社区 - 远离道路
+        { id: 'shrine_main', name: '星樱神社', x: 2200, y: 1550, width: 120, height: 160, color: '#f44336', enterable: true },
+        { id: 'torii', name: '大鸟居', x: 2250, y: 1750, width: 120, height: 22, color: '#e91e63', enterable: false },
+        { id: 'sacred_tree', name: '神树', x: 2250, y: 1620, width: 70, height: 70, color: '#4caf50', enterable: false }
+    ];
+
+    const PLAZAS = [
+        { id: 'dead_end_plaza', x: 250, y: 1020, radius: 50, type: 'dead_end' }
+    ];
+
+    let canvas, ctx, offscreenCanvas, offscreenCtx;
+    let camera = { x: 0, y: 0, zoom: 1 };
+    let player = { x: 60, y: 100, direction: 'down', sneaking: false, invincible: false, invincibleTimer: 3000 };
+    let vehicles = [];
+    let pedestrians = [];
+    let keys = {};
+    let frameCount = 0;
+    let animationId = null;
+    let nearbyNPC = null;
+
+    function init() {
+        canvas = document.getElementById('game-canvas');
+        ctx = canvas.getContext('2d');
+        
+        offscreenCanvas = document.createElement('canvas');
+        offscreenCanvas.width = CONFIG.WORLD_WIDTH;
+        offscreenCanvas.height = CONFIG.WORLD_HEIGHT;
+        offscreenCtx = offscreenCanvas.getContext('2d');
+
+        canvas.width = CONFIG.CANVAS_WIDTH;
+        canvas.height = CONFIG.CANVAS_HEIGHT;
+
+        window.addEventListener('keydown', handleKeyDown);
+        window.addEventListener('keyup', handleKeyUp);
+
+        generateStaticMap();
+        spawnInitialEntities();
+        gameLoop();
+    }
+
+    function generateStaticMap() {
+        offscreenCtx.clearRect(0, 0, CONFIG.WORLD_WIDTH, CONFIG.WORLD_HEIGHT);
+        offscreenCtx.fillStyle = '#d0d0d0';
+        offscreenCtx.fillRect(0, 0, CONFIG.WORLD_WIDTH, CONFIG.WORLD_HEIGHT);
+        
+        drawIrregularRoads(offscreenCtx);
+        drawSidewalks(offscreenCtx);
+        drawCrosswalks(offscreenCtx);
+        drawPlazas(offscreenCtx);
+        drawBuildings(offscreenCtx);
+        drawDecorations(offscreenCtx);
+    }
+
+    function drawIrregularRoads(ctx) {
+        for (const road of ROADS_DATA) {
+            drawRoadSegment(ctx, road);
+        }
+    }
+
+    function drawRoadSegment(ctx, road) {
+        const color = road.type === 'main' ? '#333' : road.type === 'secondary' ? '#4a4a4a' : '#666';
+        
+        ctx.strokeStyle = color;
+        ctx.lineWidth = road.width;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        
+        ctx.beginPath();
+        
+        if (road.path.length >= 2) {
+            ctx.moveTo(road.path[0].x, road.path[0].y);
+            
+            for (let i = 1; i < road.path.length; i++) {
+                const prev = road.path[i - 1];
+                const curr = road.path[i];
+                
+                if (curr.cp) {
+                    ctx.quadraticCurveTo(curr.cp.x, curr.cp.y, curr.x, curr.y);
+                } else {
+                    ctx.lineTo(curr.x, curr.y);
+                }
+            }
+        }
+        
+        ctx.stroke();
+        drawRoadTexture(ctx, road);
+        drawLaneLines(ctx, road);
+    }
+
+    function drawRoadTexture(ctx, road) {
+        ctx.fillStyle = 'rgba(0,0,0,0.08)';
+        
+        for (let i = 0; i < road.path.length - 1; i++) {
+            const p1 = road.path[i];
+            const p2 = road.path[i + 1];
+            
+            const steps = Math.max(10, Math.floor(Math.hypot(p2.x-p1.x, p2.y-p1.y) / 20));
+            
+            for (let j = 0; j < steps; j++) {
+                const t = j / steps;
+                let x, y;
+                
+                if (p2.cp) {
+                    const cp = p2.cp;
+                    x = Math.pow(1 - t, 2) * p1.x + 2 * (1 - t) * t * cp.x + Math.pow(t, 2) * p2.x;
+                    y = Math.pow(1 - t, 2) * p1.y + 2 * (1 - t) * t * cp.y + Math.pow(t, 2) * p2.y;
+                } else {
+                    x = p1.x + (p2.x - p1.x) * t;
+                    y = p1.y + (p2.y - p1.y) * t;
+                }
+                
+                if (Math.random() > 0.6) {
+                    ctx.fillRect(x - 3, y - 3, 6, 6);
+                }
+            }
+        }
+    }
+
+    function drawLaneLines(ctx, road) {
+        if (road.lanes <= 1) return;
+        
+        ctx.setLineDash([20, 20]);
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 2;
+        
+        const offset = road.width / (road.lanes + 1);
+        
+        for (let lane = 1; lane < road.lanes; lane++) {
+            drawOffsetPath(ctx, road, offset * lane);
+        }
+        
+        ctx.setLineDash([]);
+    }
+
+    function drawOffsetPath(ctx, road, offset) {
+        if (road.path.length < 2) return;
+        
+        ctx.beginPath();
+        
+        for (let i = 0; i < road.path.length - 1; i++) {
+            const p1 = road.path[i];
+            const p2 = road.path[i + 1];
+            
+            const dist = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+            const perpX = -(p2.y - p1.y) / dist * offset;
+            const perpY = (p2.x - p1.x) / dist * offset;
+            
+            if (i === 0) {
+                ctx.moveTo(p1.x + perpX, p1.y + perpY);
+            }
+            
+            if (p2.cp) {
+                ctx.quadraticCurveTo(
+                    p2.cp.x + perpX, p2.cp.y + perpY,
+                    p2.x + perpX, p2.y + perpY
+                );
+            } else {
+                ctx.lineTo(p2.x + perpX, p2.y + perpY);
+            }
+        }
+        
+        ctx.stroke();
+    }
+
+    function drawSidewalks(ctx) {
+        const sidewalkWidth = 40;
+
+        for (const road of ROADS_DATA) {
+            drawSidewalkForRoad(ctx, road, sidewalkWidth);
+        }
+    }
+
+    function drawSidewalkForRoad(ctx, road, width) {
+        ctx.fillStyle = '#95a5a6';
+        
+        for (let i = 0; i < road.path.length - 1; i++) {
+            const p1 = road.path[i];
+            const p2 = road.path[i + 1];
+            
+            const dist = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+            const perpX = -(p2.y - p1.y) / dist;
+            const perpY = (p2.x - p1.x) / dist;
+            
+            const outerOffset = (road.width / 2) + width;
+            
+            drawSidewalkStrip(ctx, p1, p2, perpX, perpY, outerOffset, width);
+            drawSidewalkStrip(ctx, p1, p2, -perpX, -perpY, outerOffset, width);
+        }
+        
+        drawBrickPattern(ctx, road, width);
+    }
+
+    function drawSidewalkStrip(ctx, p1, p2, perpX, perpY, offset, width) {
+        ctx.beginPath();
+        
+        if (p2.cp) {
+            const cp = p2.cp;
+            ctx.moveTo(p1.x + perpX * offset, p1.y + perpY * offset);
+            ctx.quadraticCurveTo(
+                cp.x + perpX * offset, cp.y + perpY * offset,
+                p2.x + perpX * offset, p2.y + perpY * offset
+            );
+            ctx.lineTo(p2.x + perpX * (offset + width), p2.y + perpY * (offset + width));
+            ctx.quadraticCurveTo(
+                cp.x + perpX * (offset + width), cp.y + perpY * (offset + width),
+                p1.x + perpX * (offset + width), p1.y + perpY * (offset + width)
+            );
+        } else {
+            ctx.moveTo(p1.x + perpX * offset, p1.y + perpY * offset);
+            ctx.lineTo(p2.x + perpX * offset, p2.y + perpY * offset);
+            ctx.lineTo(p2.x + perpX * (offset + width), p2.y + perpY * (offset + width));
+            ctx.lineTo(p1.x + perpX * (offset + width), p1.y + perpY * (offset + width));
+        }
+        
+        ctx.closePath();
+        ctx.fill();
+    }
+
+    function drawBrickPattern(ctx, road, width) {
+        ctx.fillStyle = '#7f8c8d';
+        const brickSize = 8;
+        
+        for (let i = 0; i < road.path.length - 1; i++) {
+            const p1 = road.path[i];
+            const p2 = road.path[i + 1];
+            
+            const dist = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+            const steps = Math.floor(dist / brickSize);
+            const perpX = -(p2.y - p1.y) / dist;
+            const perpY = (p2.x - p1.x) / dist;
+            
+            for (let j = 0; j < steps; j++) {
+                const t = j / steps;
+                let x, y;
+                
+                if (p2.cp) {
+                    const cp = p2.cp;
+                    x = Math.pow(1 - t, 2) * p1.x + 2 * (1 - t) * t * cp.x + Math.pow(t, 2) * p2.x;
+                    y = Math.pow(1 - t, 2) * p1.y + 2 * (1 - t) * t * cp.y + Math.pow(t, 2) * p2.y;
+                } else {
+                    x = p1.x + (p2.x - p1.x) * t;
+                    y = p1.y + (p2.y - p1.y) * t;
+                }
+                
+                for (let side = -1; side <= 1; side += 2) {
+                    for (let bw = 0; bw < width; bw += brickSize) {
+                        const bx = x + perpX * ((road.width / 2) + bw + 4) * side;
+                        const by = y + perpY * ((road.width / 2) + bw + 4) * side;
+                        
+                        if ((Math.floor(bx / brickSize) + Math.floor(by / brickSize)) % 2 === 0) {
+                            ctx.fillRect(bx - brickSize/2, by - brickSize/2, brickSize, brickSize);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    function drawCrosswalks(ctx) {
+        for (const cw of CROSSWALKS) {
+            ctx.save();
+            ctx.translate(cw.x, cw.y);
+            ctx.rotate((cw.rotation * Math.PI) / 180);
+            
+            ctx.fillStyle = '#fff';
+            const stripeWidth = 8;
+            const gap = 8;
+            
+            if (cw.width > cw.height) {
+                for (let i = 0; i < cw.width; i += stripeWidth + gap) {
+                    ctx.fillRect(i - cw.width/2, -cw.height/2, stripeWidth, cw.height);
+                }
+            } else {
+                for (let i = 0; i < cw.height; i += stripeWidth + gap) {
+                    ctx.fillRect(-cw.width/2, i - cw.height/2, cw.width, stripeWidth);
+                }
+            }
+            
+            ctx.restore();
+        }
+    }
+
+    function drawPlazas(ctx) {
+        for (const plaza of PLAZAS) {
+            ctx.fillStyle = '#c0c0c0';
+            ctx.beginPath();
+            ctx.arc(plaza.x, plaza.y, plaza.radius, 0, Math.PI * 2);
+            ctx.fill();
+            
+            ctx.strokeStyle = '#8b8b8b';
+            ctx.lineWidth = 3;
+            ctx.stroke();
+            
+            ctx.fillStyle = '#2ecc71';
+            ctx.beginPath();
+            ctx.arc(plaza.x, plaza.y, plaza.radius * 0.4, 0, Math.PI * 2);
+            ctx.fill();
+        }
+    }
+
+    function drawBuildings(ctx) {
+        for (const building of BUILDINGS) {
+            ctx.fillStyle = 'rgba(0,0,0,0.3)';
+            ctx.fillRect(building.x + 5, building.y + 5, building.width, building.height);
+            
+            ctx.fillStyle = building.color;
+            ctx.fillRect(building.x, building.y, building.width, building.height);
+            
+            ctx.strokeStyle = 'rgba(0,0,0,0.5)';
+            ctx.lineWidth = 2;
+            ctx.strokeRect(building.x, building.y, building.width, building.height);
+            
+            ctx.fillStyle = '#ffeaa7';
+            for (let wx = building.x + 10; wx < building.x + building.width - 20; wx += 20) {
+                for (let wy = building.y + 10; wy < building.y + building.height - 30; wy += 15) {
+                    ctx.fillRect(wx, wy, 12, 10);
+                }
+            }
+            
+            ctx.fillStyle = '#2d3436';
+            ctx.fillRect(building.x + building.width/2 - 10, building.y + building.height - 20, 20, 20);
+            
+            ctx.fillStyle = '#fff';
+            ctx.font = '11px Microsoft YaHei';
+            ctx.textAlign = 'center';
+            ctx.fillText(building.name, building.x + building.width/2, building.y - 3);
+            ctx.textAlign = 'left';
+        }
+    }
+
+    function drawDecorations(ctx) {
+        const lampPositions = [
+            { x: 400, y: 500 }, { x: 600, y: 550 }, { x: 800, y: 700 },
+            { x: 1200, y: 600 }, { x: 1200, y: 1000 }, { x: 1500, y: 1500 },
+            { x: 1800, y: 1700 }, { x: 200, y: 650 }, { x: 300, y: 800 }
+        ];
+        
+        for (const lamp of lampPositions) {
+            ctx.fillStyle = '#4a4a4a';
+            ctx.fillRect(lamp.x - 2, lamp.y, 4, 25);
+            
+            ctx.fillStyle = '#666';
+            ctx.beginPath();
+            ctx.arc(lamp.x, lamp.y, 5, 0, Math.PI * 2);
+            ctx.fill();
+            
+            ctx.fillStyle = 'rgba(255, 255, 150, 0.25)';
+            ctx.beginPath();
+            ctx.arc(lamp.x, lamp.y, 15, 0, Math.PI * 2);
+            ctx.fill();
+        }
+        
+        const binPositions = [
+            { x: 350, y: 450 }, { x: 1100, y: 500 }, { x: 1400, y: 1350 },
+            { x: 1700, y: 1750 }, { x: 250, y: 700 }
+        ];
+        
+        for (const bin of binPositions) {
+            ctx.fillStyle = '#555';
+            ctx.fillRect(bin.x, bin.y, 12, 16);
+            ctx.fillStyle = '#444';
+            ctx.fillRect(bin.x - 2, bin.y - 3, 16, 4);
+        }
+        
+        ctx.fillStyle = '#333';
+        ctx.font = '10px Microsoft YaHei';
+        ctx.textAlign = 'center';
+        
+        const streetNames = [
+            { x: 400, y: 480, name: '樱花大道' },
+            { x: 1200, y: 600, name: '星樱路' },
+            { x: 1500, y: 1480, name: '商业街' },
+            { x: 1800, y: 1680, name: '参道' }
+        ];
+        
+        for (const street of streetNames) {
+            ctx.fillText(street.name, street.x, street.y);
+        }
+        
+        ctx.textAlign = 'left';
+    }
+
+    function spawnInitialEntities() {
+        vehicles = [];
+        pedestrians = [];
+        
+        for (let i = 0; i < 8; i++) spawnVehicle();
+        for (let i = 0; i < 15; i++) spawnPedestrian();
+    }
+
+    function spawnVehicle() {
+        if (vehicles.length >= CONFIG.VEHICLE_MAX) return;
+
+        const road = ROADS_DATA[Math.floor(Math.random() * ROADS_DATA.length)];
+        if (road.path.length < 2) return;
+
+        const startIdx = Math.random() > 0.5 ? 0 : Math.floor(road.path.length / 2);
+        const start = road.path[startIdx];
+        const next = road.path[startIdx === 0 ? 1 : road.path.length - 1];
+
+        const dist = Math.hypot(next.x - start.x, next.y - start.y);
+        const perpX = -(next.y - start.y) / dist;
+        const perpY = (next.x - start.x) / dist;
+
+        const laneOffset = (road.width / (road.lanes + 1)) * (Math.floor(Math.random() * road.lanes) + 1);
+
+        vehicles.push({
+            id: 'v_' + Date.now() + '_' + Math.random(),
+            x: start.x + perpX * laneOffset,
+            y: start.y + perpY * laneOffset,
+            width: road.type === 'main' ? 56 : 48,
+            height: 28,
+            speed: CONFIG.VEHICLE_SPEED + Math.random() * 0.4,
+            direction: startIdx === 0 ? 1 : -1,
+            roadId: road.id,
+            currentSegment: startIdx,
+            color: ['#e74c3c', '#3498db', '#2ecc71', '#f39c12', '#9b59b6'][Math.floor(Math.random() * 5)],
+            type: Math.random() > 0.9 ? 'police' : 'car',
+            stopped: false,
+            pathProgress: 0,
+            angle: Math.atan2(next.y - start.y, next.x - start.x)
+        });
+    }
+
+    function spawnPedestrian() {
+        if (pedestrians.length >= CONFIG.PEDESTRIAN_MAX) return;
+        
+        const road = ROADS_DATA[Math.floor(Math.random() * ROADS_DATA.length)];
+        if (road.path.length < 2) return;
+        
+        const idx = Math.floor(Math.random() * (road.path.length - 1));
+        const p1 = road.path[idx];
+        const p2 = road.path[idx + 1];
+        
+        const t = Math.random();
+        let x, y;
+        
+        if (p2.cp) {
+            x = Math.pow(1 - t, 2) * p1.x + 2 * (1 - t) * t * p2.cp.x + Math.pow(t, 2) * p2.x;
+            y = Math.pow(1 - t, 2) * p1.y + 2 * (1 - t) * t * p2.cp.y + Math.pow(t, 2) * p2.y;
+        } else {
+            x = p1.x + (p2.x - p1.x) * t;
+            y = p1.y + (p2.y - p1.y) * t;
+        }
+        
+        const dist = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+        const perpX = -(p2.y - p1.y) / dist;
+        const perpY = (p2.x - p1.x) / dist;
+        
+        const offset = (road.width / 2) + 50;
+        const side = Math.random() > 0.5 ? 1 : -1;
+        
+        pedestrians.push({
+            id: 'p_' + Date.now() + '_' + Math.random(),
+            x: x + perpX * offset * side,
+            y: y + perpY * offset * side,
+            targetX: x + perpX * offset * side,
+            targetY: y + perpY * offset * side,
+            width: CONFIG.NPC_SIZE, 
+            height: CONFIG.NPC_SIZE,
+            speed: 0.4 + Math.random() * 0.4,
+            color: ['#3498db', '#e74c3c', '#2ecc71', '#7f8c8d', '#bdc3c7'][Math.floor(Math.random() * 5)],
+            type: ['student', 'worker', 'elder', 'child'][Math.floor(Math.random() * 4)],
+            name: ['路人A', '路人B', '学生', '上班族', '老人'][Math.floor(Math.random() * 5)],
+            state: 'wandering'
+        });
+    }
+
+    function update() {
+        frameCount++;
+        
+        updatePlayer();
+        updateCamera();
+        updateVehicles();
+        updatePedestrians();
+        updateTrafficLights();
+        checkEdgeTeleport();
+        
+        if (Math.random() < 0.02 && vehicles.length < CONFIG.VEHICLE_MAX) spawnVehicle();
+        if (Math.random() < 0.01 && pedestrians.length < CONFIG.PEDESTRIAN_MAX) spawnPedestrian();
+        
+        updateUI();
+    }
+
+    function updatePlayer() {
+        const speed = player.sneaking ? CONFIG.PLAYER_SNEAK_SPEED : CONFIG.PLAYER_SPEED;
+        let dx = 0, dy = 0;
+        
+        if (keys['w'] || keys['arrowup']) dy = -speed;
+        if (keys['s'] || keys['arrowdown']) dy = speed;
+        if (keys['a'] || keys['arrowleft']) dx = -speed;
+        if (keys['d'] || keys['arrowright']) dx = speed;
+        
+        if (dx !== 0 && dy !== 0) { dx *= 0.707; dy *= 0.707; }
+        
+        if (canMoveTo(player.x + dx, player.y + dy)) {
+            player.x += dx;
+            player.y += dy;
+            
+            if (dx !== 0 || dy !== 0) {
+                player.direction = dx > 0 ? 'right' : dx < 0 ? 'left' : dy > 0 ? 'down' : 'up';
+            }
+            
+            game.hp = Math.max(0, game.hp - 0.01);
+        }
+        
+        if (player.invincible) {
+            player.invincibleTimer -= 16;
+            if (player.invincibleTimer <= 0) player.invincible = false;
+        }
+    }
+
+    function canMoveTo(x, y) {
+        // 边界检查
+        if (x < 0 || x > CONFIG.WORLD_WIDTH - CONFIG.PLAYER_SIZE ||
+            y < 0 || y > CONFIG.WORLD_HEIGHT - CONFIG.PLAYER_SIZE) return false;
+        
+        // 允许在任何区域自由移动（包括马路）
+        // 只在建筑内部阻挡（除了门口）
+        for (const building of BUILDINGS) {
+            if (x + CONFIG.PLAYER_SIZE > building.x && x < building.x + building.width &&
+                y + CONFIG.PLAYER_SIZE > building.y && y < building.y + building.height) {
+                // 检查是否靠近门口（允许通过）
+                const doorX = building.x + building.width/2;
+                const doorY = building.y + building.height;
+                if (Math.hypot(x + CONFIG.PLAYER_SIZE/2 - doorX, y + CONFIG.PLAYER_SIZE/2 - doorY) < 35) {
+                    return true;
+                }
+                return false;
+            }
+        }
+        
+        // 可以自由穿过马路、人行道、斑马线等所有区域
+        return true;
+    }
+
+    function isOnWalkableArea(x, y) {
+        const centerX = x + CONFIG.PLAYER_SIZE/2;
+        const centerY = y + CONFIG.PLAYER_SIZE/2;
+        
+        // 检查是否在道路边缘（人行道区域）
+        for (const road of ROADS_DATA) {
+            // 道路边缘区域 = 道路中心 ± (道路宽度/2 + 人行道宽度)
+            const edgeWidth = road.width / 2 + 40; // 人行道宽度40px
+            if (isPointNearPath(centerX, centerY, road, edgeWidth)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    function isOnRoad(x, y) {
+        const centerX = x + CONFIG.PLAYER_SIZE/2;
+        const centerY = y + CONFIG.PLAYER_SIZE/2;
+        
+        for (const road of ROADS_DATA) {
+            if (isPointNearPath(centerX, centerY, road, road.width / 2)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    function isOnCrosswalk(x, y) {
+        const centerX = x + CONFIG.PLAYER_SIZE/2;
+        const centerY = y + CONFIG.PLAYER_SIZE/2;
+
+        for (const cw of CROSSWALKS) {
+            const expandedWidth = cw.width + 60;
+            const expandedHeight = cw.height + 60;
+            if (centerX >= cw.x - expandedWidth/2 && centerX <= cw.x + expandedWidth/2 &&
+                centerY >= cw.y - expandedHeight/2 && centerY <= cw.y + expandedHeight/2) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    function isPointNearPath(px, py, road, threshold) {
+        for (let i = 0; i < road.path.length - 1; i++) {
+            const p1 = road.path[i];
+            const p2 = road.path[i + 1];
+            
+            let minDist;
+            
+            if (p2.cp) {
+                minDist = pointToQuadraticDistance(px, py, p1.x, p1.y, p2.cp.x, p2.cp.y, p2.x, p2.y);
+            } else {
+                minDist = pointToLineDistance(px, py, p1.x, p1.y, p2.x, p2.y);
+            }
+            
+            if (minDist < threshold) return true;
+        }
+        return false;
+    }
+
+    function pointToLineDistance(px, py, x1, y1, x2, y2) {
+        const dx = x2 - x1;
+        const dy = y2 - y1;
+        const t = Math.max(0, Math.min(1, ((px - x1) * dx + (py - y1) * dy) / (dx * dx + dy * dy)));
+        const nearX = x1 + t * dx;
+        const nearY = y1 + t * dy;
+        return Math.hypot(px - nearX, py - nearY);
+    }
+
+    function pointToQuadraticDistance(px, py, x1, y1, cx, cy, x2, y2) {
+        let minDist = Infinity;
+        for (let t = 0; t <= 1; t += 0.1) {
+            const x = Math.pow(1 - t, 2) * x1 + 2 * (1 - t) * t * cx + Math.pow(t, 2) * x2;
+            const y = Math.pow(1 - t, 2) * y1 + 2 * (1 - t) * t * cy + Math.pow(t, 2) * y2;
+            const dist = Math.hypot(px - x, py - y);
+            minDist = Math.min(minDist, dist);
+        }
+        return minDist;
+    }
+
+    function updateCamera() {
+        const targetX = player.x - CONFIG.CANVAS_WIDTH / 2;
+        const targetY = player.y - CONFIG.CANVAS_HEIGHT / 2;
+        
+        camera.x += (targetX - camera.x) * 0.1;
+        camera.y += (targetY - camera.y) * 0.1;
+        
+        camera.x = Math.max(0, Math.min(CONFIG.WORLD_WIDTH - CONFIG.CANVAS_WIDTH, camera.x));
+        camera.y = Math.max(0, Math.min(CONFIG.WORLD_HEIGHT - CONFIG.CANVAS_HEIGHT, camera.y));
+    }
+
+    function updateVehicles() {
+        for (const vehicle of vehicles) {
+            const road = ROADS_DATA.find(r => r.id === vehicle.roadId);
+            if (!road || road.path.length < 2) continue;
+            
+            vehicle.stopped = false;
+            
+            for (const light of TRAFFIC_LIGHTS) {
+                const dist = Math.hypot(vehicle.x - light.x, vehicle.y - light.y);
+                if (dist < 50 && (light.state === 'red' || light.state === 'yellow')) {
+                    vehicle.stopped = true;
+                    break;
+                }
+            }
+            
+            if (!vehicle.stopped) {
+                for (const other of vehicles) {
+                    if (other.id === vehicle.id) continue;
+                    const dist = Math.hypot(vehicle.x - other.x, vehicle.y - other.y);
+                    const minDist = (vehicle.width + other.width) / 2 + 20;
+                    if (dist < minDist) {
+                        vehicle.stopped = true;
+                        break;
+                    }
+                }
+            }
+            
+            if (!vehicle.stopped) {
+                moveVehicleAlongRoad(vehicle, road);
+            }
+            
+            if (!player.invincible) {
+                if (vehicle.x < player.x + CONFIG.PLAYER_SIZE && vehicle.x + vehicle.width > player.x &&
+                    vehicle.y < player.y + CONFIG.PLAYER_SIZE && vehicle.y + vehicle.height > player.y) {
+                    handleVehicleHit(vehicle);
+                }
+            }
+        }
+        
+        vehicles = vehicles.filter(v =>
+            v.x > -100 && v.x < CONFIG.WORLD_WIDTH + 100 &&
+            v.y > -100 && v.y < CONFIG.WORLD_HEIGHT + 100
+        );
+    }
+
+    function moveVehicleAlongRoad(vehicle, road) {
+        if (vehicle.stopped) return;
+        
+        const p1 = road.path[vehicle.currentSegment];
+        const p2 = road.path[vehicle.currentSegment + 1];
+        
+        if (p2.cp) {
+            const t = vehicle.pathProgress;
+            const nextT = t + vehicle.speed * 0.005 * vehicle.direction;
+            
+            if (nextT >= 1 || nextT <= 0) {
+                advanceVehicleSegment(vehicle, road);
+            } else {
+                vehicle.pathProgress = nextT;
+                vehicle.x = Math.pow(1 - nextT, 2) * p1.x + 2 * (1 - nextT) * nextT * p2.cp.x + Math.pow(nextT, 2) * p2.x;
+                vehicle.y = Math.pow(1 - nextT, 2) * p1.y + 2 * (1 - nextT) * nextT * p2.cp.y + Math.pow(nextT, 2) * p2.y;
+                // 计算切线角度
+                const dx = 2 * (1 - nextT) * (p2.cp.x - p1.x) + 2 * nextT * (p2.x - p2.cp.x);
+                const dy = 2 * (1 - nextT) * (p2.cp.y - p1.y) + 2 * nextT * (p2.y - p2.cp.y);
+                vehicle.angle = Math.atan2(dy * vehicle.direction, dx * vehicle.direction);
+            }
+        } else {
+            const dx = p2.x - p1.x;
+            const dy = p2.y - p1.y;
+            const dist = Math.hypot(dx, dy);
+            
+            const t = vehicle.pathProgress;
+            const nextT = t + vehicle.speed / dist * vehicle.direction;
+            
+            if (nextT >= 1 || nextT <= 0) {
+                advanceVehicleSegment(vehicle, road);
+            } else {
+                vehicle.pathProgress = nextT;
+                vehicle.x = p1.x + dx * nextT;
+                vehicle.y = p1.y + dy * nextT;
+                vehicle.angle = Math.atan2(dy * vehicle.direction, dx * vehicle.direction);
+            }
+        }
+    }
+
+    function advanceVehicleSegment(vehicle, road) {
+        if (vehicle.direction === 1) {
+            if (vehicle.currentSegment < road.path.length - 2) {
+                vehicle.currentSegment++;
+                vehicle.pathProgress = 0;
+            } else {
+                const newRoad = ROADS_DATA[Math.floor(Math.random() * ROADS_DATA.length)];
+                vehicle.roadId = newRoad.id;
+                vehicle.currentSegment = Math.random() > 0.5 ? 0 : newRoad.path.length - 1;
+                vehicle.direction = vehicle.currentSegment === 0 ? 1 : -1;
+                vehicle.pathProgress = 0;
+            }
+        } else {
+            if (vehicle.currentSegment > 0) {
+                vehicle.currentSegment--;
+                vehicle.pathProgress = 1;
+            } else {
+                const newRoad = ROADS_DATA[Math.floor(Math.random() * ROADS_DATA.length)];
+                vehicle.roadId = newRoad.id;
+                vehicle.currentSegment = Math.random() > 0.5 ? 0 : newRoad.path.length - 1;
+                vehicle.direction = vehicle.currentSegment === 0 ? 1 : -1;
+                vehicle.pathProgress = vehicle.direction === 1 ? 0 : 1;
+            }
+        }
+        
+        const newRoad = ROADS_DATA.find(r => r.id === vehicle.roadId);
+        if (newRoad && newRoad.path.length >= 2) {
+            const idx = vehicle.currentSegment;
+            const p1 = newRoad.path[idx];
+            const p2 = newRoad.path[idx + (vehicle.direction === 1 ? 1 : -1)];
+            if (p1 && p2) {
+                vehicle.angle = Math.atan2(p2.y - p1.y, p2.x - p1.x);
+            }
+        }
+    }
+
+    function handleVehicleHit(vehicle) {
+        const isOnCrosswalk = isOnCrosswalk(player.x, player.y);
+        const damage = vehicle.type === 'police' ? 30 : 15 + Math.random() * 10;
+        game.hp = Math.max(0, game.hp - damage);
+        
+        if (vehicle.type === 'police') {
+            game.sin += 30;
+            alert('🚔 你被警察撞到了！罪恶值+30');
+        } else if (isOnCrosswalk) {
+            alert(`💥 你在斑马线上被车撞了！司机全责！受到${Math.floor(damage)}点伤害`);
+        } else {
+            game.sin += 10;
+            alert(`💥 你横穿马路被车撞了！自己担责！罪恶值+10，受到${Math.floor(damage)}点伤害`);
+        }
+        
+        player.invincible = true;
+        player.invincibleTimer = 1500;
+    }
+
+    function updatePedestrians() {
+        nearbyNPC = null;
+        
+        for (const pedestrian of pedestrians) {
+            switch (pedestrian.state) {
+                case 'wandering':
+                    const dx = pedestrian.targetX - pedestrian.x;
+                    const dy = pedestrian.targetY - pedestrian.y;
+                    const dist = Math.hypot(dx, dy);
+                    
+                    if (dist < 10) {
+                        const nearbyRoad = ROADS_DATA.find(r => 
+                            isPointNearPath(pedestrian.x, pedestrian.y, r, 50)
+                        );
+                        
+                        if (nearbyRoad && nearbyRoad.path.length >= 2) {
+                            const idx = Math.min(Math.floor(Math.random() * (nearbyRoad.path.length - 1)), nearbyRoad.path.length - 2);
+                            const p1 = nearbyRoad.path[idx];
+                            const p2 = nearbyRoad.path[idx + 1];
+                            const t = Math.random();
+                            
+                            let nx, ny;
+                            if (p2.cp) {
+                                nx = Math.pow(1 - t, 2) * p1.x + 2 * (1 - t) * t * p2.cp.x + Math.pow(t, 2) * p2.x;
+                                ny = Math.pow(1 - t, 2) * p1.y + 2 * (1 - t) * t * p2.cp.y + Math.pow(t, 2) * p2.y;
+                            } else {
+                                nx = p1.x + (p2.x - p1.x) * t;
+                                ny = p1.y + (p2.y - p1.y) * t;
+                            }
+                            
+                            const ndist = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+                            const nperpX = -(p2.y - p1.y) / ndist;
+                            const nperpY = (p2.x - p1.x) / ndist;
+                            
+                            const offset = (nearbyRoad.width / 2) + 50;
+                            const side = Math.random() > 0.5 ? 1 : -1;
+                            
+                            pedestrian.targetX = nx + nperpX * offset * side;
+                            pedestrian.targetY = ny + nperpY * offset * side;
+                        }
+                    } else {
+                        pedestrian.x += (dx / dist) * pedestrian.speed;
+                        pedestrian.y += (dy / dist) * pedestrian.speed;
+                    }
+                    break;
+            }
+            
+            const playerDist = Math.hypot(player.x - pedestrian.x, player.y - pedestrian.y);
+            if (playerDist < 50) {
+                nearbyNPC = pedestrian;
+            }
+            
+            for (const other of pedestrians) {
+                if (other.id === pedestrian.id) continue;
+                const pDist = Math.hypot(pedestrian.x - other.x, pedestrian.y - other.y);
+                if (pDist < 25) {
+                    const pushX = (pedestrian.x - other.x) / pDist * 0.3;
+                    const pushY = (pedestrian.y - other.y) / pDist * 0.3;
+                    pedestrian.x += pushX;
+                    pedestrian.y += pushY;
+                }
+            }
+        }
+        
+        pedestrians = pedestrians.filter(p =>
+            p.x > -50 && p.x < CONFIG.WORLD_WIDTH + 50 &&
+            p.y > -50 && p.y < CONFIG.WORLD_HEIGHT + 50
+        );
+    }
+
+    function updateTrafficLights() {
+        for (const light of TRAFFIC_LIGHTS) {
+            light.frame++;
+            
+            if (light.state === 'green' && light.frame >= CONFIG.TRAFFIC_LIGHT_FRAMES.green) {
+                light.state = 'yellow';
+                light.frame = 0;
+            } else if (light.state === 'yellow' && light.frame >= CONFIG.TRAFFIC_LIGHT_FRAMES.yellow) {
+                light.state = 'red';
+                light.frame = 0;
+            } else if (light.state === 'red' && light.frame >= CONFIG.TRAFFIC_LIGHT_FRAMES.red) {
+                light.state = 'green';
+                light.frame = 0;
+            }
+        }
+    }
+
+    function checkEdgeTeleport() {
+        const margin = 50;
+        
+        if (player.x < margin) {
+            player.x = CONFIG.WORLD_WIDTH - 100;
+        } else if (player.x > CONFIG.WORLD_WIDTH - margin) {
+            player.x = 100;
+        } else if (player.y < margin) {
+            player.y = CONFIG.WORLD_HEIGHT - 100;
+        } else if (player.y > CONFIG.WORLD_HEIGHT - margin) {
+            player.y = 100;
+        }
+    }
+
+    function render() {
+        ctx.drawImage(
+            offscreenCanvas,
+            camera.x, camera.y,
+            CONFIG.CANVAS_WIDTH, CONFIG.CANVAS_HEIGHT,
+            0, 0,
+            CONFIG.CANVAS_WIDTH, CONFIG.CANVAS_HEIGHT
+        );
+        
+        renderTrafficLights();
+        renderVehicles();
+        renderPedestrians();
+        renderPlayer();
+        renderInteractionHints();
+    }
+
+    function renderTrafficLights() {
+        for (const light of TRAFFIC_LIGHTS) {
+            const x = light.x - camera.x;
+            const y = light.y - camera.y;
+            
+            if (x < -20 || x > CONFIG.CANVAS_WIDTH + 20 ||
+                y < -20 || y > CONFIG.CANVAS_HEIGHT + 20) continue;
+            
+            ctx.fillStyle = '#2d3436';
+            ctx.fillRect(x - 3, y - 20, 6, 40);
+            
+            ctx.fillStyle = '#1a1a2e';
+            ctx.fillRect(x - 10, y - 25, 20, 35);
+            
+            ctx.fillStyle = light.state === 'red' ? '#e74c3c' : '#4a1a1a';
+            ctx.beginPath(); ctx.arc(x, y - 15, 5, 0, Math.PI*2); ctx.fill();
+            
+            ctx.fillStyle = light.state === 'yellow' ? '#f39c12' : '#4a3a0a';
+            ctx.beginPath(); ctx.arc(x, y, 5, 0, Math.PI*2); ctx.fill();
+            
+            ctx.fillStyle = light.state === 'green' ? '#2ecc71' : '#0a4a1a';
+            ctx.beginPath(); ctx.arc(x, y + 15, 5, 0, Math.PI*2); ctx.fill();
+        }
+    }
+
+    function renderVehicles() {
+        for (const vehicle of vehicles) {
+            const x = vehicle.x - camera.x;
+            const y = vehicle.y - camera.y;
+            
+            if (x < -80 || x > CONFIG.CANVAS_WIDTH + 80 ||
+                y < -80 || y > CONFIG.CANVAS_HEIGHT + 80) continue;
+            
+            ctx.save();
+            ctx.translate(x + vehicle.width/2, y + vehicle.height/2);
+            ctx.rotate(vehicle.angle);
+            
+            // 车身阴影
+            ctx.fillStyle = 'rgba(0,0,0,0.3)';
+            ctx.fillRect(-vehicle.width/2 + 2, -vehicle.height/2 + 2, vehicle.width, vehicle.height);
+            
+            // 车身
+            ctx.fillStyle = vehicle.color;
+            ctx.fillRect(-vehicle.width/2, -vehicle.height/2, vehicle.width, vehicle.height);
+            
+            // 车窗
+            ctx.fillStyle = '#87ceeb';
+            ctx.fillRect(-vehicle.width * 0.3, -vehicle.height * 0.3, vehicle.width * 0.6, vehicle.height * 0.6);
+            
+            // 车灯
+            ctx.fillStyle = vehicle.stopped ? '#e74c3c' : '#f1c40f';
+            ctx.fillRect(vehicle.width/2 - 6, -vehicle.height/2 + 4, 6, 4);
+            ctx.fillRect(vehicle.width/2 - 6, vehicle.height/2 - 8, 6, 4);
+            ctx.fillRect(-vehicle.width/2, -vehicle.height/2 + 4, 6, 4);
+            ctx.fillRect(-vehicle.width/2, vehicle.height/2 - 8, 6, 4);
+            
+            ctx.restore();
+            
+            if (vehicle.type === 'police') {
+                ctx.save();
+                ctx.translate(x + vehicle.width/2, y);
+                ctx.rotate(vehicle.angle);
+                ctx.fillStyle = frameCount % 30 < 15 ? '#e74c3c' : '#3498db';
+                ctx.fillRect(-6, -10, 12, 4);
+                ctx.restore();
+            }
+        }
+    }
+
+    function renderPedestrians() {
+        for (const pedestrian of pedestrians) {
+            const x = pedestrian.x - camera.x;
+            const y = pedestrian.y - camera.y;
+            
+            if (x < -30 || x > CONFIG.CANVAS_WIDTH + 30 ||
+                y < -30 || y > CONFIG.CANVAS_HEIGHT + 30) continue;
+            
+            ctx.fillStyle = 'rgba(0,0,0,0.2)';
+            ctx.beginPath();
+            ctx.arc(x + pedestrian.width/2 + 1, y + pedestrian.height/2 + 1, pedestrian.width/2, 0, Math.PI*2);
+            ctx.fill();
+            
+            ctx.fillStyle = pedestrian.color;
+            ctx.beginPath();
+            ctx.arc(x + pedestrian.width/2, y + pedestrian.height/2, pedestrian.width/2, 0, Math.PI*2);
+            ctx.fill();
+            
+            ctx.fillStyle = '#fff';
+            ctx.font = '9px Microsoft YaHei';
+            ctx.textAlign = 'center';
+            ctx.fillText(pedestrian.name, x + pedestrian.width/2, y - 3);
+            ctx.textAlign = 'left';
+        }
+    }
+
+    function renderPlayer() {
+        const x = player.x - camera.x;
+        const y = player.y - camera.y;
+        
+        ctx.fillStyle = player.invincible && frameCount % 10 < 5 ? 'rgba(255,255,255,0.5)' : 'rgba(0,0,0,0.3)';
+        ctx.fillRect(x + 2, y + 2, CONFIG.PLAYER_SIZE, CONFIG.PLAYER_SIZE);
+        
+        ctx.fillStyle = '#3498db';
+        ctx.fillRect(x, y, CONFIG.PLAYER_SIZE, CONFIG.PLAYER_SIZE);
+        
+        ctx.fillStyle = '#fff';
+        ctx.beginPath();
+        ctx.arc(x + CONFIG.PLAYER_SIZE/2, y + CONFIG.PLAYER_SIZE/3, 5, 0, Math.PI*2);
+        ctx.fill();
+        
+        ctx.fillStyle = '#fff';
+        ctx.font = '10px Microsoft YaHei';
+        ctx.textAlign = 'center';
+        ctx.fillText('玩家', x + CONFIG.PLAYER_SIZE/2, y - 5);
+        ctx.textAlign = 'left';
+    }
+
+    function renderInteractionHints() {
+        if (nearbyNPC) {
+            const x = nearbyNPC.x - camera.x;
+            const y = nearbyNPC.y - camera.y;
+            
+            ctx.fillStyle = 'rgba(0,0,0,0.7)';
+            ctx.fillRect(x - 35, y - 40, 70, 22);
+            
+            ctx.fillStyle = '#fff';
+            ctx.font = '10px Microsoft YaHei';
+            ctx.textAlign = 'center';
+            ctx.fillText('按 F 交互', x, y - 24);
+            ctx.textAlign = 'left';
+        }
+    }
+
+    function updateUI() {
+        document.getElementById('stat-hp').textContent = Math.floor(game.hp);
+        document.getElementById('stat-coin').textContent = game.coin;
+        document.getElementById('stat-sin').textContent = game.sin;
+        document.getElementById('stat-day').textContent = `第${game.day}天`;
+        
+        const regions = [
+            { name: '住宅区', x: 200, y: 500, w: 400, h: 600 },
+            { name: '学校区', x: 800, y: 150, w: 400, h: 500 },
+            { name: '商业区', x: 1200, y: 1000, w: 600, h: 600 },
+            { name: '神社区', x: 1700, y: 1600, w: 400, h: 500 }
+        ];
+        
+        let regionName = '星樱坂';
+        for (const region of regions) {
+            if (player.x >= region.x && player.x <= region.x + region.w &&
+                player.y >= region.y && player.y <= region.y + region.h) {
+                regionName = region.name;
+                break;
+            }
+        }
+        document.getElementById('location-name').textContent = regionName;
+    }
+
+    function handleKeyDown(e) {
+        keys[e.key.toLowerCase()] = true;
+        
+        if (e.key === 'Shift') {
+            player.sneaking = true;
+        }
+        
+        if (e.key === 'f' || e.key === 'F') {
+            if (nearbyNPC) {
+                document.getElementById('interaction-menu').style.left = (player.x - camera.x + 40) + 'px';
+                document.getElementById('interaction-menu').style.top = (player.y - camera.y - 10) + 'px';
+                document.getElementById('interaction-menu').classList.add('visible');
+            }
+        }
+        
+        if (e.key === 'Escape') {
+            document.getElementById('interaction-menu').classList.remove('visible');
+        }
+    }
+
+    function handleKeyUp(e) {
+        keys[e.key.toLowerCase()] = false;
+        
+        if (e.key === 'Shift') {
+            player.sneaking = false;
+        }
+    }
+
+    function gameLoop() {
+        update();
+        render();
+        animationId = requestAnimationFrame(gameLoop);
+    }
+
+    window.showQuestLog = function() { alert('任务日志功能开发中...'); };
+    window.openStatus = function() { alert('状态面板功能开发中...'); };
+    window.goHome = function() { 
+        // 重置游戏状态，防止速度累积
+        resetGame();
+        player.x = 60;
+        player.y = 100;
+        player.invincible = true;
+        player.invincibleTimer = 2000;
+    };
+    
+    function resetGame() {
+        // 清除旧的动画帧
+        if (animationId) {
+            cancelAnimationFrame(animationId);
+            animationId = null;
+        }
+        
+        // 重置所有状态
+        frameCount = 0;
+        vehicles = [];
+        pedestrians = [];
+        keys = {};
+        nearbyNPC = null;
+        
+        // 重新生成初始实体
+        spawnInitialEntities();
+        
+        // 重新启动游戏循环
+        gameLoop();
+    }
+    window.continueToEvent = function() { alert('事件系统开发中...'); };
+    window.interactWithNPC = function(action) {
+        document.getElementById('interaction-menu').classList.remove('visible');
+        alert(`${action === 'talk' ? '交谈' : action === 'rob' ? '抢劫' : '攻击'}功能开发中...`);
+    };
+
+    window.addEventListener('load', init);
+})();
+</script>
+</body>
+</html>
